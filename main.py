@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# From: https://www.cse.sc.edu/~jokane/agitr/
-# Translation to Python by Patricia Shaw
 
 import rospy
 import cv2
@@ -18,6 +16,7 @@ from control_msgs.msg import (FollowJointTrajectoryAction,
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from geometry_msgs.msg import TransformStamped
 
+#Global variables
 values = [0.0,0.0,0.0,0.0]
 green = False
 bridge = CvBridge()
@@ -26,31 +25,31 @@ head_moving = False
 head_joint_names = ["head_pan_joint", "head_tilt_joint"]
 head_joint_positions = [0.0, 0.0]
 
+# Checks if a head goal is complete, logs when goal is completed and updates head_moving to False.
 def goalDone_cb(state, done):
 	rospy.loginfo("Head goal reached")
 	global head_moving
 	head_moving = False
-	
+
+# Logs when a activity starts running
 def active_cb():
 	rospy.loginfo("Head movement active")
-	
+
+# Checks if a goal is active then logs the current activity and sets the values og head_moving to True
 def feedback_cb(fb):
 	rospy.loginfo("Head moving")
 	global head_moving
 	head_moving = True
 	
+# Sets head position based on x and y position specified
 def head_pos(x,y):
 	head_joint_positions
 	global head_joint_names
 	global head_client
 	global head_moving
 	
-	while head_moving:
-		rate.sleep()
-		
 	head_joint_positions[1] = y
 	head_joint_positions[0] = x
-		
 	
 	trajectory = JointTrajectory()
 	trajectory.joint_names = head_joint_names
@@ -69,41 +68,28 @@ def head_pos(x,y):
 	head_client.wait_for_result(rospy.Duration(6.0))  # specify timeout on waiting
 	rospy.loginfo("...done")
 
+# Decide if head should look down or up to keep object in frame. Will attempt to keep x unchanged
+# NOTE: 0,0 is top left of camera, bottom left is 
 def head_pos_center():
 	global head_joint_positions
-	global head_joint_names
 	global values
-	global head_client
-	global head_moving
+
+	x = head_joint_positions[0]
 	
 	if values[1] < 220:
 		rospy.loginfo("Looking up")
 		head_joint_positions[1] = head_joint_positions[1] - 0.1
+		y = head_joint_positions[1]
 	
 	elif values[1] > 260:
 		rospy.loginfo("Looking down")
 		head_joint_positions[1] = head_joint_positions[1] + 0.1
+		y = head_joint_positions[1]
 		
 	else:
 		rospy.loginfo("No adjustment needed")
 	
-	
-	trajectory = JointTrajectory()
-	trajectory.joint_names = head_joint_names
-	trajectory.points.append(JointTrajectoryPoint())
-	trajectory.points[0].positions = head_joint_positions
-	trajectory.points[0].velocities = [0.0]
-	trajectory.points[0].accelerations = [0.0]
-	trajectory.points[0].time_from_start = rospy.Duration(5.0)
-
-	head_goal = FollowJointTrajectoryGoal()
-	head_goal.trajectory = trajectory
-	head_goal.goal_time_tolerance = rospy.Duration(0.0)
-	
-	rospy.loginfo("Setting positions...")
-	head_client.send_goal(head_goal, goalDone_cb, active_cb, feedback_cb)
-	head_client.wait_for_result(rospy.Duration(6.0))  # specify timeout on waiting
-	rospy.loginfo("...done")
+	head_pos(x, y)
 
 def cb_depthImage(image):
 	global bridge
@@ -187,6 +173,10 @@ def pubvel():
 	head_client = actionlib.SimpleActionClient("head_controller/follow_joint_trajectory", FollowJointTrajectoryAction)
 	head_client.wait_for_server()
 	rospy.loginfo("...connected.")
+
+	head_pos(0, 0)
+	while head_moving:
+		rate.sleep()
 	
 	while not rospy.is_shutdown():
 		msg = Twist()
