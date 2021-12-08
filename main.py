@@ -91,6 +91,17 @@ def head_pos_center():
 	
 	head_pos(x, y)
 
+def horizontal_center():
+	global values
+
+	if values[0] < 300:
+		rospy.loginfo("Object to the right %.2f", values[0])
+		return 0.3
+
+	elif values[0] > 340:
+		rospy.loginfo("Object to the left %.2f", values[0])
+		return -0.3
+
 def cb_depthImage(image):
 	global bridge
 	global values
@@ -194,53 +205,46 @@ def pubvel():
 			rospy.loginfo("Area   = %.2f",values[3])
 			rospy.loginfo("Depth  = %.2f",depth)
 			
-			while depth > 0.7:
-			
-				if values[0] < 300:
-					rospy.loginfo("Object to the right %.2f", values[0])
-					while values[0] < 300:
-						msg.angular.z = 0.3
+			if depth > 0.7:
+				while depth > 0.7:
+
+					if values[0] < 300 or values[0] > 340:
+						rospy.loginfo("Target is to the side, correcting")
+						while values[0] < 300 or values[0] > 340:
+							msg.angular.z = horizontal_center()
+							msg.linear.x = 0.1
+							pub.publish(msg)
+					
+					elif values[1] > 380 or values[1] < 100:
+						rospy.loginfo("Object not in center. Correcting")
+						msg.linear.x = 0
 						pub.publish(msg)
-					msg.angular.z = 0
-					pub.publish(msg)
-					
-				elif values[0] > 340:
-					rospy.loginfo("Object to the left %.2f", values[0])
-					while values[0] > 340:
-						msg.angular.z = - 0.3
+						head_pos_center()
+						while head_moving:
+							rate.sleep()
+						
+					else:
+						rospy.loginfo("Target in center of frame, approaching")
+						rospy.loginfo("Approaching")
+						msg.linear.x = 0.3
 						pub.publish(msg)
-						rate.sleep()
-					msg.angular.z = 0
-					pub.publish(msg)
-					
-				else:
-					rospy.loginfo("Target ahead, approach ready")
-					
+
+			else:
+				msg.linear.x = 0
+				pub.publish(msg)
 				if values[1] > 380 or values[1] < 100:
-					rospy.loginfo("Object not in center. Correcting")
-					msg.linear.x = 0
-					pub.publish(msg)
 					head_pos_center()
-					while head_moving:
-						rate.sleep()
-						
-				else:
-					rospy.loginfo("Target in center of frame")
-					break
-			
-			rospy.loginfo("Approaching")
-			msg.linear.x = 0.3
-			pub.publish(msg)
+				rospy.loginfo("Reached object. Depth = %.2f",depth)
+
+
 					
-						
+		'''				
 		else:
 			while not green:
 				msg.angular.z = 1
 				pub.publish(msg)
-				rate.sleep()
+				rate.sleep()'''
 		
-		# Reset head position before next loop
-		#head_pos(0,0)
 		# Wait until it's time for another iteration
 		rate.sleep()
 
