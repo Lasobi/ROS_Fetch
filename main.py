@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
+# Libraries
 import rospy
 import cv2
 import actionlib
 import tf2_ros
 import tf_conversions
 
+# ROS messages needed
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from opencv_apps.msg import MomentArrayStamped
@@ -14,7 +16,9 @@ from cv_bridge import CvBridge, CvBridgeError
 from control_msgs.msg import (FollowJointTrajectoryAction,
                               FollowJointTrajectoryGoal)
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PoseStamped, Pose, Point, Quaternion
+from moveit_msgs.msg import MoveItErrorCodes
+from moveit_python import MoveGroupInterface, PlanningSceneInterface
 
 #Global variables
 values = [0.0,0.0,0.0,0.0]
@@ -91,6 +95,7 @@ def head_pos_center():
 	
 	head_pos(x, y)
 
+# Attempts to turn the robot towards the object so allow straight travel
 def horizontal_center():
 	global values
 
@@ -102,6 +107,7 @@ def horizontal_center():
 		rospy.loginfo("Object to the left %.2f", values[0])
 		return -0.3
 
+# Attempts to fint the distance (depth) to the target in the image
 def cb_depthImage(image):
 	global bridge
 	global values
@@ -118,21 +124,27 @@ def cb_depthImage(image):
 		cv2.imshow("Image", cv_image)
 		cv2.waitKey(3)
 		
-		transBroad()
+		transBroad(depth)
 		
 	except CvBridgeError as e:
 		print(e)
 		rospy.loginfo(e)
-		
-def transBroad():
+
+# Uses the distance to the object and position in image to calculate actual position of object
+def transBroad(depth):
 	br = tf2_ros.TransformBroadcaster()
 	t = TransformStamped()
+	global values
+
+	offsetX = -(((values[0] - (640/2))/554.254691191187) * depth) #OffsetX is y
+	offsetY = -(((values[1] - (480/2))/554.254691191187) * depth) #OffsetY is z
 	
 	t.header.stamp = rospy.Time.now()
 	t.header.frame_id = "head_camera_depth_frame"
 	t.child_frame_id = "target_object"
-	t.transform.translation.x = 0
-	t.transform.translation.z = 0
+	t.transform.translation.x = depth
+	t.transform.translation.z = offsetY
+	t.transform.translation.y = offsetX
 	q = tf_conversions.transformations.quaternion_from_euler(0, 0, 0)
 	t.transform.rotation.x = q[0]
 	t.transform.rotation.y = q[1]
@@ -141,6 +153,7 @@ def transBroad():
 	
 	br.sendTransform(t)
 
+# Grabs information from picture about object location on a 2D plane
 def ContourSub(msg):
 	global values
 	global green
@@ -155,13 +168,61 @@ def ContourSub(msg):
 	else:
 		green = False
 
+def TransListen():
+	global tfBuffer
+	global listener
 
+	try:
+		trans = tfBuffer.lookup_transform('base_link', 'target_object', rospy.Time())
+	except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+		rospy.loginfo("Except")
+		#rate.sleep()
+		return
+
+	transX = trans.transform.translation.x
+	transY = trans.transform.translation.y
+	transZ = trans.transform.translation.z
+
+	#TODO: Make gripper point down and add offset
+	rotX = trans.transform.rotation.x
+	rotY = trans.transform.rotation.y
+	rotZ = trans.transform.rotation.z
+	rotW = trans.transform.rotation.w
+
+	gripper_poses = Pose(Point(transX, transY, transZ), Quaternion(rotX, rotY, rotZ, rotW))
+	moveEndEffector(gripper_poses)
+
+def moveEndEffector(pose):
+	global move_group
+	global gripper_pose_stamped
+	global gripper_frame
+
+	gripper_pose_stamped.header.stamp = rospy.Time.now()
+	gripper_pose_stamped.pose = pose
+	move_group.moveToPose(gripper_pose_stamped, gripper_frame)
+	result = move_group.get_move_action().get_result()
+
+	if result:
+		if result.error_code.val == MoveItErrorCodes.SUCCESS:
+			rospy.loginfo("Success")
+		else:
+			rospy.logerr("Arm goal is in state: %s", move_group.get_move_action().get_state())
+
+	else:
+		rospy.logerr("MoveIt! failure. No result returned!")
+
+# Somehow ended up as the main code to guide the robot
 def pubvel():
 	global values
 	global green
 	global head_client
 	global depth
 	global reset
+	global move_group
+	global tfBuffer
+	global listener
+	global gripper_pose_stamped
+	global gripper_frame
 	
 	looking_at_object = False
 	
@@ -174,9 +235,28 @@ def pubvel():
     # Subscribe to contour
 	rospy.Subscriber('/contour_moments/moments', MomentArrayStamped, ContourSub)
 	rospy.Subscriber("/head_camera/depth_registered/image_raw", Image, cb_depthImage)
+
+	# Create move group interface for fetch
+	move_group = MoveGroupInterface("arm_with_torso", "base_link")
+
+	tfBuffer = tf2_ros.Buffer()
+	listener = tf2_ros.TransformListener(tfBuffer)
+
+	gripper_pose_stamped = PoseStamped()
+	gripper_pose_stamped.header.frame_id = 'base_link'
+	gripper_frame = "wrist_roll_link"
 	
-	#rospy.spin()
-	
+	# Define ground plane
+	planning_scene = PlanningSceneInterface("base_link")
+	planning_scene.removeCollisionObject("my_front_ground")
+	planning_scene.removeCollisionObject("my_back_ground")
+	planning_scene.removeCollisionObject("my_right_ground")
+	planning_scene.removeCollisionObject("my_left_ground")
+	planning_scene.addCube("my_front_ground", 2, 1.1, 0.0, -1.0)
+	planning_scene.addCube("my_back_ground", 2, -1.2, 0.0, -1.0)
+	planning_scene.addCube("my_left_ground", 2, 0.0, 1.2, -1.0)
+	planning_scene.addCube("my_right_ground", 2, 0.0, -1.2, -1.0)
+
 	# Loop at 10Hz until the node is shutdown
 	rate = rospy.Rate(10)
 	
@@ -235,15 +315,8 @@ def pubvel():
 				if values[1] > 380 or values[1] < 100:
 					head_pos_center()
 				rospy.loginfo("Reached object. Depth = %.2f",depth)
-
-
-					
-		'''				
-		else:
-			while not green:
-				msg.angular.z = 1
-				pub.publish(msg)
-				rate.sleep()'''
+				rospy.loginfo("Navigating arm")
+				TransListen()
 		
 		# Wait until it's time for another iteration
 		rate.sleep()
