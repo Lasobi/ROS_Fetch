@@ -6,6 +6,7 @@ import cv2
 import actionlib
 import tf2_ros
 import tf_conversions
+import math
 
 # ROS messages needed
 from geometry_msgs.msg import Twist
@@ -211,6 +212,16 @@ def moveEndEffector(pose):
 	else:
 		rospy.logerr("MoveIt! failure. No result returned!")
 
+# Callback function to execute for each time pose message arrives
+def poseMessageRecieved(msg):
+	#rospy.loginfo("%.2f", msg.ranges[217])
+	i = 0
+	while i < 662:
+		if not math.isinf(msg.ranges[i]):
+			rospy.loginfo("%.2f",msg.ranges[i])
+		i += 1
+		
+
 # Somehow ended up as the main code to guide the robot
 def pubvel():
 	global values
@@ -227,7 +238,7 @@ def pubvel():
 	looking_at_object = False
 	
 	# Initialise the ROS system and become a node
-	rospy.init_node('LookAndApproach', anonymous=False)
+	rospy.init_node('Assignment', anonymous=False)
 	
 	# Create a publisher object
 	pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1000)
@@ -235,6 +246,7 @@ def pubvel():
     # Subscribe to contour
 	rospy.Subscriber('/contour_moments/moments', MomentArrayStamped, ContourSub)
 	rospy.Subscriber("/head_camera/depth_registered/image_raw", Image, cb_depthImage)
+	rospy.Subscriber("/base_scan", LaserScan, poseMessageRecieved)
 
 	# Create move group interface for fetch
 	move_group = MoveGroupInterface("arm_with_torso", "base_link")
