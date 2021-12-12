@@ -169,6 +169,13 @@ def ContourSub(msg):
 	else:
 		green = False
 
+# Pose to use when travelling
+# This pose puts the arm away from the camera and raises torso and arm high so it is ready for grabbing the object
+def armPrep():
+	gripper_poses = Pose(Point(0.042, 0.384, 1.826), Quaternion(0.173, -0.693, -0.242, 0.657))
+	moveEndEffector(gripper_poses)
+
+# Calculates pose needed to grab object
 def TransListen():
 	global tfBuffer
 	global listener
@@ -190,9 +197,20 @@ def TransListen():
 	rotZ = trans.transform.rotation.z
 	rotW = trans.transform.rotation.w
 
+	tableHeight = transZ + -1.1
+
+	transZ += 0.18
+	rotW = 0.45
+
 	gripper_poses = Pose(Point(transX, transY, transZ), Quaternion(rotX, rotY, rotZ, rotW))
+
+	planning_scene = PlanningSceneInterface("base_link")
+	planning_scene.removeCollisionObject("table")
+	planning_scene.addCube("table", 2, 1.1, 0.0, tableHeight)
+
 	moveEndEffector(gripper_poses)
 
+# Tells the robot to change pose
 def moveEndEffector(pose):
 	global move_group
 	global gripper_pose_stamped
@@ -214,12 +232,8 @@ def moveEndEffector(pose):
 
 # Callback function to execute for each time pose message arrives
 def poseMessageRecieved(msg):
-	#rospy.loginfo("%.2f", msg.ranges[217])
-	i = 0
-	while i < 662:
-		if not math.isinf(msg.ranges[i]):
-			rospy.loginfo("%.2f",msg.ranges[i])
-		i += 1
+	global laserValues
+	laserValues = msg
 		
 
 # Somehow ended up as the main code to guide the robot
@@ -277,7 +291,12 @@ def pubvel():
 	head_client.wait_for_server()
 	rospy.loginfo("...connected.")
 
-	head_pos(0, 0)
+	# Reset head position to 0,0
+	#head_pos(0, 0)
+
+	# Move arm out of the way of the camera and rais it to prepare for grabbing
+	armPrep()
+
 	while head_moving:
 		rate.sleep()
 	
@@ -306,14 +325,14 @@ def pubvel():
 							msg.angular.z = horizontal_center()
 							msg.linear.x = 0.1
 							pub.publish(msg)
+						msg.angular.z = 0.0
+						pub.publish(msg)
 					
 					elif values[1] > 380 or values[1] < 100:
 						rospy.loginfo("Object not in center. Correcting")
 						msg.linear.x = 0
 						pub.publish(msg)
 						head_pos_center()
-						while head_moving:
-							rate.sleep()
 						
 					else:
 						rospy.loginfo("Target in center of frame, approaching")
