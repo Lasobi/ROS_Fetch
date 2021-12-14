@@ -7,6 +7,7 @@ import actionlib
 import tf2_ros
 import tf_conversions
 import math
+import time
 
 # ROS messages needed
 from geometry_msgs.msg import Twist
@@ -14,8 +15,8 @@ from sensor_msgs.msg import LaserScan
 from opencv_apps.msg import MomentArrayStamped
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
-from control_msgs.msg import (FollowJointTrajectoryAction,
-                              FollowJointTrajectoryGoal)
+from control_msgs.msg import (FollowJointTrajectoryAction, FollowJointTrajectoryGoal)
+from control_msgs.msg import (GripperCommandAction, GripperCommandGoal)
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from geometry_msgs.msg import TransformStamped, PoseStamped, Pose, Point, Quaternion
 from moveit_msgs.msg import MoveItErrorCodes
@@ -29,6 +30,11 @@ head_moving = False
 
 head_joint_names = ["head_pan_joint", "head_tilt_joint"]
 head_joint_positions = [0.0, 0.0]
+torso_joint_name = "torso_lift_joint"
+torso_joint_position = 0.0
+
+gripper_closed = 0.03
+gripper_open = 0.10
 
 # Checks if a head goal is complete, logs when goal is completed and updates head_moving to False.
 def goalDone_cb(state, done):
@@ -172,7 +178,7 @@ def ContourSub(msg):
 # Pose to use when travelling
 # This pose puts the arm away from the camera and raises torso and arm high so it is ready for grabbing the object
 def armPrep():
-	gripper_poses = Pose(Point(0.042, 0.384, 1.826), Quaternion(0.173, -0.693, -0.242, 0.657))
+	gripper_poses = Pose(Point(0.042, 0.384, 1.800), Quaternion(0.173, -0.693, -0.242, 0.45))
 	moveEndEffector(gripper_poses)
 
 # Calculates pose needed to grab object
@@ -191,22 +197,34 @@ def TransListen():
 	transY = trans.transform.translation.y
 	transZ = trans.transform.translation.z
 
-	#TODO: Make gripper point down and add offset
 	rotX = trans.transform.rotation.x
 	rotY = trans.transform.rotation.y
 	rotZ = trans.transform.rotation.z
 	rotW = trans.transform.rotation.w
 
-	tableHeight = transZ + -1.1
+	tableHeight = transZ + -1.13
+	topHeight = tableHeight + 2.7
+	midHeight = tableHeight + 1.5
+	leftSideOffset = transY + -1.3
+	rightSideOffset = transY + 1.3
 
-	transZ += 0.18
+	transX += 0.10
+	transZ += 0.17
 	rotW = 0.45
+	rotY = 0.45
 
 	gripper_poses = Pose(Point(transX, transY, transZ), Quaternion(rotX, rotY, rotZ, rotW))
 
 	planning_scene = PlanningSceneInterface("base_link")
 	planning_scene.removeCollisionObject("table")
-	planning_scene.addCube("table", 2, 1.1, 0.0, tableHeight)
+	planning_scene.addCube("table", 2, 1.20, 0.0, tableHeight)
+	planning_scene.removeCollisionObject("top")
+	planning_scene.addCube("top", 2, 1.75, 0.0, topHeight)
+	planning_scene.removeCollisionObject("right")
+	planning_scene.removeCollisionObject("left")
+	planning_scene.addCube("right", 2, 1.6, rightSideOffset, midHeight)
+	planning_scene.addCube("left", 2, 1.6, leftSideOffset, midHeight)
+
 
 	moveEndEffector(gripper_poses)
 
@@ -234,7 +252,28 @@ def moveEndEffector(pose):
 def poseMessageRecieved(msg):
 	global laserValues
 	laserValues = msg
-		
+
+# Make gripper open and close
+def gripperControl(open):
+	global gripper_open
+	global gripper_closed
+	global gripper_client
+
+	if open:
+		gripper_goal = GripperCommandGoal()
+		gripper_goal.command.max_effort = 7.0
+		gripper_goal.command.position = gripper_open
+		rospy.loginfo("Opening gripper...")
+	else:
+		gripper_goal = GripperCommandGoal()
+		gripper_goal.command.max_effort = 7.0
+		gripper_goal.command.position = gripper_closed
+		rospy.loginfo("Closing gripper...")
+	
+	gripper_client.send_goal(gripper_goal)
+	gripper_client.wait_for_result(rospy.Duration(5.0))
+
+	rospy.loginfo("...done")
 
 # Somehow ended up as the main code to guide the robot
 def pubvel():
@@ -248,8 +287,9 @@ def pubvel():
 	global listener
 	global gripper_pose_stamped
 	global gripper_frame
-	
-	looking_at_object = False
+	global gripper_client
+
+	objectGrabbed = False
 	
 	# Initialise the ROS system and become a node
 	rospy.init_node('Assignment', anonymous=False)
@@ -291,19 +331,25 @@ def pubvel():
 	head_client.wait_for_server()
 	rospy.loginfo("...connected.")
 
+	rospy.loginfo("Waiting for gripper_controller...")
+	gripper_client = actionlib.SimpleActionClient("gripper_controller/gripper_action", GripperCommandAction)
+	gripper_client.wait_for_server()
+	rospy.loginfo("...connected")
+
 	# Reset head position to 0,0
 	#head_pos(0, 0)
 
+	# Makes sure the gripper is open and that anything that might be held is dropped
+	gripperControl(True)
+
 	# Move arm out of the way of the camera and rais it to prepare for grabbing
 	armPrep()
-
-	while head_moving:
-		rate.sleep()
 	
 	while not rospy.is_shutdown():
 		msg = Twist()
 		
-		if green:
+		if green and not objectGrabbed:
+			rospy.loginfo("Object found")
 			msg.angular.z = 0
 			msg.linear.x = 0
 			pub.publish(msg)
@@ -347,7 +393,29 @@ def pubvel():
 					head_pos_center()
 				rospy.loginfo("Reached object. Depth = %.2f",depth)
 				rospy.loginfo("Navigating arm")
+				gripperControl(True)
 				TransListen()
+				i = 0
+				while i < 17:
+					msg.linear.x = -0.1
+					pub.publish(msg)
+					rate.sleep()
+					i += 1
+				msg.linear.x = 0.0
+				pub.publish(msg)
+				gripperControl(False)
+				object_grabbed = True
+				armPrep()
+
+		# Search for any object until one is within range
+		else:
+			rospy.loginfo("Object not found")
+			'''while not green:
+				msg.angular.z = 0.5
+				pub.publish(msg)
+				rate.sleep()
+			msg.angular.z = 0.0
+			pub.publish(msg)'''
 		
 		# Wait until it's time for another iteration
 		rate.sleep()
