@@ -24,9 +24,14 @@ from moveit_python import MoveGroupInterface, PlanningSceneInterface
 
 #Global variables
 values = [0.0,0.0,0.0,0.0]
-green = False
+valuesRed = [0.0,0.0,0.0,0.0]
+valuesBlue = [0.0,0.0,0.0,0.0]
+blue = False
+red = False
 bridge = CvBridge()
 head_moving = False
+robotHeight = 1.00
+collitionObjectExist = False
 
 head_joint_names = ["head_pan_joint", "head_tilt_joint"]
 head_joint_positions = [0.0, 0.0]
@@ -79,6 +84,10 @@ def head_pos(x,y):
 	head_client.wait_for_result(rospy.Duration(6.0))  # specify timeout on waiting
 	rospy.loginfo("...done")
 
+	if head_joint_positions[0] > 0.5:
+		rospy.loginfo("Object too close to robot")
+		lowerRobot()
+
 # Decide if head should look down or up to keep object in frame. Will attempt to keep x unchanged
 # NOTE: 0,0 is top left of camera, bottom left is 
 def head_pos_center():
@@ -114,7 +123,7 @@ def horizontal_center():
 		rospy.loginfo("Object to the left %.2f", values[0])
 		return -0.3
 
-# Attempts to fint the distance (depth) to the target in the image
+# Attempts to find the distance (depth) to the target in the image
 def cb_depthImage(image):
 	global bridge
 	global values
@@ -130,7 +139,7 @@ def cb_depthImage(image):
 		cv2.circle(cv_image, (x,y), 10, 0)
 		cv2.imshow("Image", cv_image)
 		cv2.waitKey(3)
-		
+
 		transBroad(depth)
 		
 	except CvBridgeError as e:
@@ -161,30 +170,52 @@ def transBroad(depth):
 	br.sendTransform(t)
 
 # Grabs information from picture about object location on a 2D plane
-def ContourSub(msg):
-	global values
-	global green
+def ContourSubBlue(msg):
+	global valuesBlue
+	global blue
 	
 	if len(msg.moments) > 0:
-		values[0] = msg.moments[0].center.x
-		values[1] = msg.moments[0].center.y
-		values[2] = msg.moments[0].length
-		values[3] = msg.moments[0].area
-		green = True
+		valuesBlue[0] = msg.moments[0].center.x
+		valuesBlue[1] = msg.moments[0].center.y
+		valuesBlue[2] = msg.moments[0].length
+		valuesBlue[3] = msg.moments[0].area
+		blue = True
 		
 	else:
-		green = False
+		blue = False
+
+def ContourSubRed(msg):
+	global valuesRed
+	global red
+
+	if len(msg.moments) > 0:
+		valuesRed[0] = msg.moments[0].center.x
+		valuesRed[1] = msg.moments[0].center.y
+		valuesRed[2] = msg.moments[0].length
+		valuesRed[3] = msg.moments[0].area
+		red = True
+	else:
+		red = False
 
 # Pose to use when travelling
 # This pose puts the arm away from the camera and raises torso and arm high so it is ready for grabbing the object
 def armPrep():
-	gripper_poses = Pose(Point(0.042, 0.384, 1.800), Quaternion(0.173, -0.693, -0.242, 0.45))
+	gripper_poses = Pose(Point(0.042, 0.384, 1.000), Quaternion(0.173, -0.693, -0.242, 0.45))
 	moveEndEffector(gripper_poses)
 
+def lowerRobot():
+	global robotHeight
+	gripper_poses = Pose(Point(0.042, 0.384, x), Quaternion(0.173, -0.693, -0.242, 0.45))
+	moveEndEffector(gripper_poses)
+	robotHeight += - 0.2
+
 # Calculates pose needed to grab object
-def TransListen():
+def TransListen(objective):
 	global tfBuffer
 	global listener
+	global collitionObjectExist
+
+	planning_scene = PlanningSceneInterface("base_link")
 
 	try:
 		trans = tfBuffer.lookup_transform('base_link', 'target_object', rospy.Time())
@@ -208,23 +239,26 @@ def TransListen():
 	leftSideOffset = transY + -1.3
 	rightSideOffset = transY + 1.3
 
-	transX += 0.10
-	transZ += 0.17
 	rotW = 0.45
 	rotY = 0.45
 
+	if objective == True:
+		if collitionObjectExist:
+			PlanningSceneInterface.removeCollisionObject("table")
+			PlanningSceneInterface.removeCollisionObject("top")
+			PlanningSceneInterface.removeCollisionObject("right")
+			PlanningSceneInterface.removeCollisionObject("left")
+		planning_scene.addCube("table", 2, 1.20, 0.0, tableHeight)
+		planning_scene.addCube("top", 2, 1.75, 0.0, topHeight)
+		planning_scene.addCube("right", 2, 1.6, rightSideOffset, midHeight)
+		planning_scene.addCube("left", 2, 1.6, leftSideOffset, midHeight)
+		collitionObjectExist = True
+		transX += 0.10
+		transZ += 0.17
+	else:
+		transZ += 0.5
+
 	gripper_poses = Pose(Point(transX, transY, transZ), Quaternion(rotX, rotY, rotZ, rotW))
-
-	planning_scene = PlanningSceneInterface("base_link")
-	planning_scene.removeCollisionObject("table")
-	planning_scene.addCube("table", 2, 1.20, 0.0, tableHeight)
-	planning_scene.removeCollisionObject("top")
-	planning_scene.addCube("top", 2, 1.75, 0.0, topHeight)
-	planning_scene.removeCollisionObject("right")
-	planning_scene.removeCollisionObject("left")
-	planning_scene.addCube("right", 2, 1.6, rightSideOffset, midHeight)
-	planning_scene.addCube("left", 2, 1.6, leftSideOffset, midHeight)
-
 
 	moveEndEffector(gripper_poses)
 
@@ -278,7 +312,10 @@ def gripperControl(open):
 # Somehow ended up as the main code to guide the robot
 def pubvel():
 	global values
-	global green
+	global valuesBlue
+	global valuesRed
+	global blue
+	global red
 	global head_client
 	global depth
 	global reset
@@ -288,6 +325,7 @@ def pubvel():
 	global gripper_pose_stamped
 	global gripper_frame
 	global gripper_client
+	global collitionObjectExist
 
 	objectGrabbed = False
 	
@@ -298,7 +336,8 @@ def pubvel():
 	pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1000)
     
     # Subscribe to contour
-	rospy.Subscriber('/contour_moments/moments', MomentArrayStamped, ContourSub)
+	rospy.Subscriber('/contour_moments_blue/moments', MomentArrayStamped, ContourSubBlue)
+	rospy.Subscriber("/contour_moments_red/moments", MomentArrayStamped, ContourSubRed)
 	rospy.Subscriber("/head_camera/depth_registered/image_raw", Image, cb_depthImage)
 	rospy.Subscriber("/base_scan", LaserScan, poseMessageRecieved)
 
@@ -337,7 +376,7 @@ def pubvel():
 	rospy.loginfo("...connected")
 
 	# Reset head position to 0,0
-	#head_pos(0, 0)
+	head_pos(0, 0)
 
 	# Makes sure the gripper is open and that anything that might be held is dropped
 	gripperControl(True)
@@ -348,7 +387,12 @@ def pubvel():
 	while not rospy.is_shutdown():
 		msg = Twist()
 		
-		if green and not objectGrabbed:
+		if objectGrabbed == False:
+			values = valuesBlue
+		else:
+			values = valuesRed
+
+		if blue or red:
 			rospy.loginfo("Object found")
 			msg.angular.z = 0
 			msg.linear.x = 0
@@ -364,7 +408,6 @@ def pubvel():
 			
 			if depth > 0.7:
 				while depth > 0.7:
-
 					if values[0] < 300 or values[0] > 340:
 						rospy.loginfo("Target is to the side, correcting")
 						while values[0] < 300 or values[0] > 340:
@@ -372,6 +415,7 @@ def pubvel():
 							msg.linear.x = 0.1
 							pub.publish(msg)
 						msg.angular.z = 0.0
+						msg.linear.x = 0.0
 						pub.publish(msg)
 					
 					elif values[1] > 380 or values[1] < 100:
@@ -385,16 +429,14 @@ def pubvel():
 						rospy.loginfo("Approaching")
 						msg.linear.x = 0.3
 						pub.publish(msg)
-
-			else:
-				msg.linear.x = 0
-				pub.publish(msg)
+			
+			elif depth < 0.7 and objectGrabbed == False:
 				if values[1] > 380 or values[1] < 100:
 					head_pos_center()
 				rospy.loginfo("Reached object. Depth = %.2f",depth)
 				rospy.loginfo("Navigating arm")
 				gripperControl(True)
-				TransListen()
+				TransListen(True)
 				i = 0
 				while i < 17:
 					msg.linear.x = -0.1
@@ -404,18 +446,33 @@ def pubvel():
 				msg.linear.x = 0.0
 				pub.publish(msg)
 				gripperControl(False)
-				object_grabbed = True
+				objectGrabbed = True
 				armPrep()
+				head_pos(0, 0)
+
+			elif depth < 0.8 and objectGrabbed == True:
+				msg.linear.x = 0
+				pub.publish(msg)
+				if values[1] > 380 or values[1] < 100:
+					head_pos_center()
+				rospy.loginfo("Dropping object")
+				rospy.loginfo("Navigating arm")
+				TransListen(False)
+				gripperControl(True)
+				objectGrabbed = False
+				armPrep()
+				head_pos(0, 0)
 
 		# Search for any object until one is within range
 		else:
 			rospy.loginfo("Object not found")
-			'''while not green:
+			msg.linear.x = -0.1
+			while not blue:
 				msg.angular.z = 0.5
 				pub.publish(msg)
 				rate.sleep()
 			msg.angular.z = 0.0
-			pub.publish(msg)'''
+			pub.publish(msg)
 		
 		# Wait until it's time for another iteration
 		rate.sleep()
